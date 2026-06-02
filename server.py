@@ -3,6 +3,7 @@ import http.server
 import logging
 import os
 import socketserver
+import sys
 import threading
 import time
 import urllib.parse
@@ -82,12 +83,22 @@ def collect_comma_params(spec: dict) -> set[str]:
     return comma_params
 
 
+SPEC_CACHE_PATH = Path(__file__).resolve().parent / "openapi_spec_cache.json"
+
+
 def load_openapi_spec() -> dict:
+    if SPEC_CACHE_PATH.exists():
+        LOGGER.info("Loading OpenAPI spec from cache %s", SPEC_CACHE_PATH)
+        import json
+        return json.loads(SPEC_CACHE_PATH.read_text(encoding="utf-8"))
     url = "https://api.x.com/2/openapi.json"
     LOGGER.info("Fetching OpenAPI spec from %s", url)
     response = requests.get(url, timeout=30)
     response.raise_for_status()
-    return response.json()
+    spec = response.json()
+    import json
+    SPEC_CACHE_PATH.write_text(json.dumps(spec), encoding="utf-8")
+    return spec
 
 
 def _get_env_int(key: str, default: int) -> int:
@@ -286,9 +297,9 @@ def print_tool_list(spec: dict) -> None:
                 tools.append(f"{method.upper()} {path}")
 
     tools.sort()
-    print(f"Loaded {len(tools)} tools from OpenAPI:")
+    print(f"Loaded {len(tools)} tools from OpenAPI:", file=sys.stderr)
     for tool in tools:
-        print(f"- {tool}")
+        print(f"- {tool}", file=sys.stderr)
 
 
 def get_auth_headers(oauth_token: str | None = None) -> dict:
@@ -307,10 +318,15 @@ def build_oauth1_client() -> OAuth1Client:
         raise RuntimeError(
             "Missing X_OAUTH_CONSUMER_KEY or X_OAUTH_CONSUMER_SECRET for OAuth1 signing."
         )
-    access_token, access_secret = run_oauth1_flow()
+    env_access_token = os.getenv("X_OAUTH_ACCESS_TOKEN", "").strip()
+    env_access_secret = os.getenv("X_OAUTH_ACCESS_TOKEN_SECRET", "").strip()
+    if env_access_token and env_access_secret:
+        access_token, access_secret = env_access_token, env_access_secret
+    else:
+        access_token, access_secret = run_oauth1_flow()
     if is_truthy(os.getenv("X_OAUTH_PRINT_TOKENS", "0")):
-        print("OAuth1 access token:", access_token)
-        print("OAuth1 access token secret:", access_secret)
+        print("OAuth1 access token:", access_token, file=sys.stderr)
+        print("OAuth1 access token secret:", access_secret, file=sys.stderr)
     LOGGER.info("OAuth1 access token: %s", access_token)
     return OAuth1Client(
         client_key=consumer_key,
@@ -330,9 +346,9 @@ def print_oauth1_header_probe(oauth1_client: OAuth1Client, base_url: str) -> Non
     )
     auth_header = signed_headers.get("Authorization")
     if auth_header:
-        print("OAuth1 Authorization header (sample GET /2/users/me):", auth_header)
+        print("OAuth1 Authorization header (sample GET /2/users/me):", auth_header, file=sys.stderr)
     else:
-        print("OAuth1 Authorization header missing from signed probe request.")
+        print("OAuth1 Authorization header missing from signed probe request.", file=sys.stderr)
 
 
 def create_mcp() -> FastMCP:
@@ -407,9 +423,9 @@ def create_mcp() -> FastMCP:
         if print_oauth_header:
             auth_header = signed_headers.get("Authorization")
             if auth_header:
-                print("OAuth1 Authorization header:", auth_header)
+                print("OAuth1 Authorization header:", auth_header, file=sys.stderr)
             else:
-                print("OAuth1 Authorization header missing from signed request.")
+                print("OAuth1 Authorization header missing from signed request.", file=sys.stderr)
 
     async def log_request(request: httpx.Request) -> None:
         if not debug_enabled:
@@ -452,10 +468,14 @@ def create_mcp() -> FastMCP:
 
 
 def main() -> None:
-    host = os.getenv("MCP_HOST", "127.0.0.1")
-    port = int(os.getenv("MCP_PORT", "8000"))
+    transport = os.getenv("MCP_TRANSPORT", "http")
     mcp = create_mcp()
-    mcp.run(transport="http", host=host, port=port)
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        host = os.getenv("MCP_HOST", "127.0.0.1")
+        port = int(os.getenv("MCP_PORT", "8000"))
+        mcp.run(transport="http", host=host, port=port)
 
 
 if __name__ == "__main__":
